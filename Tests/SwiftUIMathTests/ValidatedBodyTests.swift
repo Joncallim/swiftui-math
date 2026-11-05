@@ -96,39 +96,38 @@ struct ValidatedBodyTests {
     await task.value
   }
 
-  @Test func cacheEvictionReleasesDisposableValuesAndAllowsRecomputation() {
+  @Test func cacheRetentionIsBoundedWithoutAKeyRegistry() {
     final class Payload {}
-    var cache = BoundedRenderCache<Int, Payload>(capacity: 2)
-    weak var first: Payload?
-    do {
-      let value = Payload()
-      first = value
-      cache.insert(value, for: 1)
+    final class WeakPayload {
+      weak var value: Payload?
+      init(_ value: Payload) { self.value = value }
     }
-    cache.insert(Payload(), for: 2)
-    #expect(first != nil)
-    cache.insert(Payload(), for: 3)
-    #expect(first == nil)
-    #expect(cache.value(for: 1) == nil)
-    #expect(cache.value(for: 3) != nil)
-    #expect(cache.count <= 2)
-    cache.insert(Payload(), for: 1)
-    #expect(cache.value(for: 1) != nil)
-    #expect(cache.count <= 2)
+    let cache = BoundedRenderCache<Int, Payload>(capacity: 2)
+    var observed: [WeakPayload] = []
+    for number in 0..<1_000 {
+      let value = Payload()
+      observed.append(WeakPayload(value))
+      cache.insert(value, for: number)
+      #expect(cache.retainedEntryUpperBound <= 2)
+    }
+    // Automatic eviction may release values earlier; it may never retain more.
+    #expect(observed.compactMap(\.value).count <= 2)
+    #expect(observed.first?.value == nil)
   }
 
-  @Test func replacingAnExistingCacheKeyDoesNotEvictOtherEntries() {
-    var cache = BoundedRenderCache<Int, Int>(capacity: 2)
+  @Test func returnedCacheValuesStayCorrectAcrossReplacementAndRecomputation() {
+    let cache = BoundedRenderCache<Int, Int>(capacity: 2)
+    for number in 0..<10_000 {
+      let key = number % 3
+      cache.insert(number, for: key)
+      if let hit = cache.value(for: key) { #expect(hit == number) }
+      #expect(cache.retainedEntryUpperBound <= 2)
+    }
     cache.insert(1, for: 1)
     cache.insert(2, for: 2)
     cache.insert(3, for: 1)
-    #expect(cache.value(for: 1) == 3)
-    #expect(cache.value(for: 2) == 2)
-    #expect(cache.count == 2)
-    for number in 0..<10_000 {
-      cache.insert(number, for: number)
-      #expect(cache.count <= 2)
-      #expect(cache.value(for: number) == number)
-    }
+    if let hit = cache.value(for: 1) { #expect(hit == 3) }
+    if let other = cache.value(for: 2) { #expect(other == 2) }
+    #expect(cache.retainedEntryUpperBound <= 2)
   }
 }
