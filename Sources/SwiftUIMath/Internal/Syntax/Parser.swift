@@ -1,8 +1,8 @@
 import Foundation
 
 extension Math {
-  struct ParserError: Error {
-    enum Code: Int {
+  public struct ParserError: Error, Sendable {
+    public enum Code: Int, Sendable {
       case mismatchedBraces = 1
       case invalidCommand
       case characterNotFound
@@ -19,8 +19,8 @@ extension Math {
       case invalidLimits
     }
 
-    let code: Code
-    let message: String
+    public let code: Code
+    public let message: String
   }
 }
 
@@ -54,17 +54,40 @@ extension Math {
     var mode: Mode = .display
 
     var error: ParserError?
+    var errorUTF16Offset: Int?
+    var bodyLimits: BodyLimits?
+    var resourceLimit: BodyResourceLimit?
+    var wasCancelled = false
+    var parserSteps = 0
+    var parserDepth = 0
+    var lexicalSource: CommentSource?
 
     // MARK: - Character-handling routines
 
-    var hasCharacters: Bool { currentCharIndex < string.endIndex }
+    var hasCharacters: Bool {
+      mutating get {
+        guard currentCharIndex < string.endIndex else { return false }
+        if bodyLimits != nil {
+          if Task.isCancelled {
+            wasCancelled = true
+            return false
+          }
+          if parserSteps >= bodyLimits!.maximumParserSteps {
+            resourceLimit = .parserSteps
+            return false
+          }
+        }
+        return true
+      }
+    }
 
     // gets the next character and increments the index
     mutating func nextCharacter() -> Character {
       assert(
-        self.hasCharacters,
+        self.currentCharIndex < self.string.endIndex,
         "Retrieving character at index \(self.currentCharIndex) beyond length \(self.string.count)"
       )
+      if bodyLimits != nil { parserSteps += 1 }
       let ch = string[currentCharIndex]
       currentCharIndex = string.index(after: currentCharIndex)
       return ch
@@ -219,11 +242,18 @@ extension Math {
 
     // MARK: - AtomList builder functions
 
-    mutating func build() -> AtomList? {
-      // Detect and strip delimiters, updating the string and mode
-      let (cleanedString, mode) = detectAndStripDelimiters(from: self.string)
-      self.string = cleanedString
-      self.currentCharIndex = cleanedString.startIndex
+    mutating func build(detectsDelimiters: Bool = true) -> AtomList? {
+      // Preserve the legacy String API's delimiter detection. Body inspection disables it.
+      let (cleanedString, mode) = detectsDelimiters
+        ? detectAndStripDelimiters(from: self.string) : (self.string, Mode.display)
+      do {
+        lexicalSource = try CommentSource(cleanedString)
+      } catch {
+        wasCancelled = true
+        return nil
+      }
+      self.string = lexicalSource!.text
+      self.currentCharIndex = self.string.startIndex
       self.mode = mode
 
       // If inline mode, we could optionally prepend a \textstyle command
@@ -272,11 +302,23 @@ extension Math {
     }
 
     mutating func buildInternal(_ oneCharOnly: Bool, stopChar stop: Character?) -> AtomList? {
+      if let bodyLimits {
+        if Task.isCancelled {
+          wasCancelled = true
+          return nil
+        }
+        guard parserDepth < bodyLimits.maximumDepth else {
+          resourceLimit = .depth
+          return nil
+        }
+      }
+      parserDepth += 1
+      defer { parserDepth -= 1 }
       let list = AtomList()
       assert(!(oneCharOnly && stop != nil), "Cannot set both oneCharOnly and stopChar.")
       var prevAtom: Atom? = nil
       while self.hasCharacters {
-        if error != nil { return nil }  // If there is an error thus far then bail out.
+        if error != nil || resourceLimit != nil || wasCancelled { return nil }  // If there is an error thus far then bail out.
 
         var atom: Atom? = nil
         let char = self.nextCharacter()
@@ -663,14 +705,19 @@ extension Math {
         skipSpaces()
         if hasCharacters && string[currentCharIndex] == "[" {
           _ = nextCharacter()  // consume '['
+          guard hasCharacters else {
+            setError(.characterNotFound, message: "Missing alignment after [")
+            return nil
+          }
           let alignmentChar = nextCharacter()
           if alignmentChar == "l" || alignmentChar == "r" || alignmentChar == "c" {
             frac.alignment = String(alignmentChar)
           }
-          // Consume closing ']'
-          if hasCharacters && string[currentCharIndex] == "]" {
-            _ = nextCharacter()
+          guard hasCharacters && string[currentCharIndex] == "]" else {
+            setError(.characterNotFound, message: "Missing ] after alignment")
+            return nil
           }
+          _ = nextCharacter()
         }
 
         frac.numerator = self.buildInternal(true)
@@ -1018,6 +1065,7 @@ extension Math {
       // Only record the first error.
       if error == nil {
         error = ParserError(code: code, message: message)
+        errorUTF16Offset = originalBodyOffset
       }
     }
 
@@ -1041,14 +1089,19 @@ extension Math {
         skipSpaces()
         if hasCharacters && string[currentCharIndex] == "[" {
           _ = nextCharacter()  // consume '['
+          guard hasCharacters else {
+            setError(.characterNotFound, message: "Missing alignment after [")
+            return nil
+          }
           let alignmentChar = nextCharacter()
           if alignmentChar == "l" || alignmentChar == "r" || alignmentChar == "c" {
             frac.alignment = String(alignmentChar)
           }
-          // Consume closing ']'
-          if hasCharacters && string[currentCharIndex] == "]" {
-            _ = nextCharacter()
+          guard hasCharacters && string[currentCharIndex] == "]" else {
+            setError(.characterNotFound, message: "Missing ] after alignment")
+            return nil
           }
+          _ = nextCharacter()
         }
 
         frac.numerator = self.buildInternal(true)
@@ -1091,6 +1144,10 @@ extension Math {
         return frac
       } else if command == "sqrt" {
         let rad = Radical()
+        guard self.hasCharacters else {
+          rad.radicand = self.buildInternal(true)
+          return rad
+        }
         let char = self.nextCharacter()
         if char == "[" {
           rad.degree = self.buildInternal(false, stopChar: "]")
@@ -1333,13 +1390,16 @@ extension Math {
           self.unlookCharacter()
         }
       }
-      return self.readString()
+      return self.readString(stopsAtComment: true)
     }
 
-    mutating func readString() -> String {
+    mutating func readString(stopsAtComment: Bool = false) -> String {
       // a string of all upper and lower case characters (and asterisks for starred environments)
       var output = ""
       while self.hasCharacters {
+        // Comments terminate a control word even though no visible space is emitted.
+        if stopsAtComment && !output.isEmpty
+          && lexicalSource?.boundaries.contains(currentCharIndex) == true { break }
         let char = self.nextCharacter()
         if char.isLowercase || char.isUppercase || char == "*" {
           output.append(char)
