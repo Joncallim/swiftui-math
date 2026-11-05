@@ -128,6 +128,15 @@ struct BodyInspectionTests {
     #expect(raw.string == "$x$")
   }
 
+  @Test func mismatchedRadicalDegreeIsAnErrorWithoutCrashing() throws {
+    guard case .invalid(let diagnostic) = try Math.inspectBody(#"\sqrt[}"#, limits: limits) else {
+      Issue.record("Expected a mismatched-brace diagnostic")
+      return
+    }
+    #expect(diagnostic.error.code == .mismatchedBraces)
+    #expect(diagnostic.utf16Offset == 7)
+  }
+
   @Test func inputLengthLimitIsUTF16AndInclusive() throws {
     let limits = Math.BodyLimits(maximumUTF16Length: 2, maximumDepth: 8, maximumParserSteps: 32)
     guard case .valid = try Math.inspectBody("xy", limits: limits) else {

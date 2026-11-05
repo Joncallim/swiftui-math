@@ -373,6 +373,10 @@ extension Math {
         } else if char == "}" {
           // \ means a command
           assert(!oneCharOnly, "This should have been handled before")
+          if stop != nil {
+            self.setError(.mismatchedBraces, message: "Unexpected closing brace.")
+            return nil
+          }
           assert(stop == nil, "This should have been handled before")
           // Special case: } terminates implicit table (name == nil) created by \\
           // This happens when \\ is used inside braces: \substack{a \\ b}
