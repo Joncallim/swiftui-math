@@ -4,14 +4,14 @@ extension Math {
   final class DisplayProvider: Sendable {
     private struct Cache {
       struct Key: Hashable {
-        let latex: String
+        let input: RenderInput
         let font: Font
         let style: TypesettingStyle
         let proposedWidth: CGFloat
       }
 
-      let atomList = NSCache<NSString, AtomList>()
-      let displayNode = NSCache<KeyBox<Key>, DisplayNode>()
+      var atomList = BoundedRenderCache<RenderInput, AtomList>(capacity: 512)
+      var displayNode = BoundedRenderCache<Key, DisplayNode>(capacity: 1_024)
     }
 
     static let shared = DisplayProvider()
@@ -20,12 +20,12 @@ extension Math {
 
     func sizeThatFits(
       proposedWidth width: CGFloat,
-      latex: String,
+      input: RenderInput,
       font: Font,
       style: TypesettingStyle
     ) -> CGSize {
       display(
-        for: latex,
+        for: input,
         font: font,
         style: style,
         proposedWidth: width
@@ -33,28 +33,28 @@ extension Math {
     }
 
     func display(
-      for latex: String,
+      for input: RenderInput,
       font: Font,
       style: TypesettingStyle,
       proposedWidth: CGFloat
     ) -> DisplayNode? {
-      cache.withValue { cache in
+      guard !input.isCancelled else { return nil }
+      return cache.withValue { cache in
+        guard !input.isCancelled else { return nil }
         let roundedWidth = proposedWidth.halfPointRounded()
-        let key = KeyBox(
-          Cache.Key(
-            latex: latex,
-            font: font,
-            style: style,
-            proposedWidth: roundedWidth
-          )
+        let key = Cache.Key(
+          input: input,
+          font: font,
+          style: style,
+          proposedWidth: roundedWidth
         )
 
-        if let displayNode = cache.displayNode.object(forKey: key) {
+        if let displayNode = cache.displayNode.value(for: key) {
           return displayNode
         }
 
         guard
-          let atomList = atomList(for: latex, cache: &cache),
+          let atomList = atomList(for: input, cache: &cache),
           let displayNode = Typesetter.createLineForMathList(
             atomList,
             font: .init(font: font),
@@ -65,35 +65,35 @@ extension Math {
           return nil
         }
 
-        cache.displayNode.setObject(displayNode, forKey: key)
+        guard !input.isCancelled else { return nil }
+        cache.displayNode.insert(displayNode, for: key)
 
         if displayNode.width != roundedWidth {
           // Cache the measured width to avoid a miss between layout and draw passes
-          let secondaryKey = KeyBox(
-            Cache.Key(
-              latex: latex,
-              font: font,
-              style: style,
-              proposedWidth: displayNode.width.halfPointRounded()
-            )
+          let secondaryKey = Cache.Key(
+            input: input,
+            font: font,
+            style: style,
+            proposedWidth: displayNode.width.halfPointRounded()
           )
-          cache.displayNode.setObject(displayNode, forKey: secondaryKey)
+          cache.displayNode.insert(displayNode, for: secondaryKey)
         }
 
         return displayNode
       }
     }
 
-    private func atomList(for latex: String, cache: inout Cache) -> AtomList? {
-      if let atomList = cache.atomList.object(forKey: latex as NSString) {
+    private func atomList(for input: RenderInput, cache: inout Cache) -> AtomList? {
+      guard !input.isCancelled else { return nil }
+      if let atomList = cache.atomList.value(for: input) {
         return atomList
       }
 
-      guard let atomList = Parser.build(fromString: latex) else {
+      guard let atomList = input.parsedAtomList(), !input.isCancelled else {
         return nil
       }
 
-      cache.atomList.setObject(atomList, forKey: latex as NSString)
+      cache.atomList.insert(atomList, for: input)
       return atomList
     }
   }

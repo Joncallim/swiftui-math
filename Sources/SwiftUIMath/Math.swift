@@ -36,20 +36,25 @@ public struct Math: View {
   @Environment(\.mathTypesettingStyle) private var typesettingStyle
   @Environment(\.mathRenderingMode) private var renderingMode
 
-  private let latex: String
+  private let input: RenderInput
 
   /// Creates a math view that renders the given LaTeX string.
   /// - Parameter latex: A LaTeX math expression.
   public init(_ latex: String) {
-    self.latex = latex
+    self.input = .automatic(latex)
+  }
+
+  /// Renders an already admitted equation body without detecting dollar delimiters again.
+  public init(_ body: ValidatedBody) {
+    self.input = .body(body)
   }
 
   public var body: some View {
-    Layout(latex: latex, font: font, style: typesettingStyle) {
+    Layout(input: input, font: font, style: typesettingStyle) {
       Canvas { context, size in
         guard
           let displayNode = DisplayProvider.shared.display(
-            for: latex,
+            for: input,
             font: font,
             style: typesettingStyle,
             proposedWidth: size.width
@@ -101,13 +106,32 @@ extension Math {
     font: Font,
     style: TypesettingStyle
   ) -> TypographicBounds {
+    bounds(for: .automatic(latex), fitting: proposal, font: font, style: style)
+  }
+
+  @_spi(Textual)
+  public static nonisolated func typographicBounds(
+    for body: ValidatedBody,
+    fitting proposal: ProposedViewSize,
+    font: Font,
+    style: TypesettingStyle
+  ) -> TypographicBounds {
+    bounds(for: .body(body), fitting: proposal, font: font, style: style)
+  }
+
+  private static nonisolated func bounds(
+    for input: RenderInput,
+    fitting proposal: ProposedViewSize,
+    font: Font,
+    style: TypesettingStyle
+  ) -> TypographicBounds {
     if let width = proposal.width, width <= 0 {
       return .zero
     }
 
     return DisplayProvider.shared
       .display(
-        for: latex,
+        for: input,
         font: font,
         style: style,
         proposedWidth: proposal.width ?? 0
@@ -125,7 +149,7 @@ extension Math {
 
 extension Math {
   private struct Layout: SwiftUI.Layout {
-    let latex: String
+    let input: RenderInput
     let font: Font
     let style: TypesettingStyle
 
@@ -136,7 +160,7 @@ extension Math {
 
       return DisplayProvider.shared.sizeThatFits(
         proposedWidth: proposal.width ?? 0,
-        latex: latex,
+        input: input,
         font: font,
         style: style
       )
